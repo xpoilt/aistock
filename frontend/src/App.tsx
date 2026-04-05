@@ -36,11 +36,15 @@ function App() {
   const [loadingData, setLoadingData] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // 解码Unicode字符
-  const decodeUnicode = (str: string) => {
-    return str.replace(/\u[0-9a-fA-F]{4}/g, (match) => {
-      return String.fromCharCode(parseInt(match.slice(2), 16));
-    });
+  const decodeUnicode = (str: string): string => {
+    if (!str) return '';
+    try {
+      return str.replace(/\\u([\dabcdef]{4})/gi, (match, hex) =>
+        String.fromCharCode(parseInt(hex, 16))
+      );
+    } catch {
+      return str;
+    }
   }
 
   useEffect(() => {
@@ -116,12 +120,12 @@ function App() {
 
       const reader = response.body?.getReader()
       const decoder = new TextDecoder()
+      let buffer = ''
       let fullContent = ''
       let currentAgent = ''
-      let buffer = ''
 
       console.log('开始处理流式响应...')
-      
+
       while (true) {
         const { done, value } = await reader!.read()
         if (done) {
@@ -129,58 +133,87 @@ function App() {
           break
         }
 
-        // 解码chunk并添加到缓冲区
-        const chunk = decoder.decode(value, { stream: true })
-        buffer += chunk
-        
-        console.log('收到chunk:', chunk)
-        
-        // 按行分割处理
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''  // 保留不完整的行
+        buffer += decoder.decode(value, { stream: true })
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              // 提取JSON数据
-              const jsonStr = line.slice(6).trim()
-              console.log('解析JSON字符串:', jsonStr)
-              
-              const data = JSON.parse(jsonStr)
-              console.log('解析到数据:', data)
-              
-              if (data.type === 'chunk') {
-                fullContent += data.content
-                currentAgent = data.agent
-                console.log('更新流式内容:', data.content)
-                setCurrentStreaming(prev => {
-                  const newContent = prev + data.content;
-                  console.log('currentStreaming更新为:', newContent);
-                  return newContent;
-                });
-              } else if (data.type === 'done') {
-                console.log('完成消息:', { agent: currentAgent, content: fullContent });
-                setMessages(prev => {
-                  const newMessages = [...prev, {
-                    id: Date.now().toString(),
-                    agent: currentAgent || data.agent,
-                    content: fullContent,
-                    timestamp: new Date()
-                  }];
-                  console.log('messages更新为:', newMessages);
-                  return newMessages;
-                });
-                // 延迟清空以确保内容显示
-                setTimeout(() => {
-                  fullContent = '';
-                  setCurrentStreaming('');
-                }, 300);
-              }
-            } catch (e) {
-              console.error('解析错误:', e, '行内容:', line)
+        // 处理双重转义：后端用 json.dumps() 发送的
+        let cleanedBuffer = buffer
+          .replace(/\\\\n/g, '\n')
+          .replace(/\\\\r/g, '\r')
+          .replace(/\\"/g, '"')
+
+        // 按 \n\n 分割事件
+        const events = cleanedBuffer.split('\n\n')
+        buffer = events.pop() || ''
+
+        for (const event of events) {
+          let trimmed = event.trim()
+          if (!trimmed) continue
+
+          // 如果被双引号包裹，先去掉
+          if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+            trimmed = trimmed.slice(1, -1)
+          }
+
+          // 处理转义字符
+          trimmed = trimmed
+            .replace(/\\"/g, '"')
+            .replace(/\\n/g, '\n')
+            .replace(/\\r/g, '\r')
+            .replace(/\\\\/g, '\\')
+
+          // 清理 data: 前缀
+          let jsonStr = trimmed
+          if (jsonStr.startsWith('data: ')) {
+            jsonStr = jsonStr.slice(6)
+          }
+
+          try {
+            const data = JSON.parse(jsonStr)
+
+            // 处理 Unicode 转义（如 \\u57fa\\u672c\\u9762）
+            if (typeof data.content === 'string') {
+              try {
+                data.content = JSON.parse(`"${data.content}"`)
+              } catch {}
             }
+            if (typeof data.agent === 'string') {
+              try {
+                data.agent = JSON.parse(`"${data.agent}"`)
+              } catch {}
+            }
+
+            if (data.type === 'chunk') {
+              fullContent += data.content || ''
+              currentAgent = data.agent || currentAgent
+              setCurrentStreaming(fullContent)
+              console.log('收到 chunk:', data.content)
+            } else if (data.type === 'done') {
+              if (fullContent && currentAgent) {
+                setMessages(prev => [...prev, {
+                  id: `${Date.now()}-${Math.random()}`,
+                  agent: currentAgent,
+                  content: fullContent,
+                  timestamp: new Date()
+                }])
+                console.log('保存消息:', { agent: currentAgent, length: fullContent.length })
+              }
+              fullContent = ''
+              currentAgent = ''
+              setCurrentStreaming('')
+            }
+          } catch (e) {
+            console.log('解析失败:', jsonStr.substring(0, 100))
           }
         }
+      }
+
+      if (fullContent && currentAgent) {
+        setMessages(prev => [...prev, {
+          id: `${Date.now()}-${Math.random()}`,
+          agent: currentAgent,
+          content: fullContent,
+          timestamp: new Date()
+        }])
       }
     } catch (err: any) {
       message.error(err.message || '讨论失败')

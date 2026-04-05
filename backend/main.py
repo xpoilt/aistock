@@ -1,8 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, AsyncIterator
 import json
 import os
 import httpx
@@ -207,86 +207,93 @@ async def discuss(request: DiscussionRequest):
     import uuid
     session_id = str(uuid.uuid4())
     agent_messages = {agent_id: [] for agent_id in request.agent_ids}
-    
-    for round_num in range(request.max_rounds):
-        for i, agent_id in enumerate(request.agent_ids):
-            agent = get_agent_by_id(agent_id)
-            if not agent:
-                continue
-            
-            is_final = (round_num == request.max_rounds - 1) and (i == len(request.agent_ids) - 1)
-            
-            if is_final:
-                stock_info = ""
-                if request.stock_data:
-                    sd = request.stock_data
-                    stock_info = f"\n\n【股票数据】\n股票代码: {request.stock_code}\n"
-                    
-                    if sd.get("daily_data"):
-                        stock_info += "\n最近交易日数据:\n"
-                        for d in sd["daily_data"][:5]:
-                            stock_info += f"  {d['date']}: 开盘={d['open']}, 最高={d['high']}, 最低={d['low']}, 收盘={d['close']}, 成交量={d['volume']}, 换手率={d['turnover']}%\n"
-                    
-                    if sd.get("fundamental_data"):
-                        stock_info += "\n财务数据:\n"
-                        for f in sd["fundamental_data"][:2]:
-                            stock_info += f"  {f['ann_date']}: 营收={f['revenue']}, 利润={f['profit']}, 净利润={f['net_profit']}, 总资产={f['assets']}, 总负债={f['liabilities']}\n"
-                
-                summary_prompt = f"请总结以上所有分析师的意见，并给出最终的投资决策。{stock_info}\n\n"
-                for aid in request.agent_ids:
-                    if agent_messages[aid]:
-                        a = get_agent_by_id(aid)
-                        summary_prompt += f"\n【{a['name']}】的观点:\n{agent_messages[aid][-1]}\n"
-                summary_prompt += f"\n\n股票代码: {request.stock_code or '未指定'}\n\n请以JSON格式输出决策，格式如下:\n{{\"decision\": \"BUY/HOLD/SELL\", \"confidence\": 0.85, \"summary\": \"决策理由摘要\"}}\n\n请确保输出是合法的JSON格式。"
-                
-                full_content = ""
-                async for chunk in call_llm_stream(agent["system_prompt"], summary_prompt):
-                    if chunk["type"] == "chunk":
-                        full_content += chunk["content"]
-                        yield f"data: {json.dumps({'type': 'chunk', 'content': chunk['content'], 'agent': agent['name'], 'round': round_num + 1})}\n\n"
-                    else:
-                        total_tokens = len(full_content) // 4
-                        yield f"data: {json.dumps({'type': 'done', 'content': full_content, 'agent': agent['name'], 'tokens': total_tokens})}\n\n"
-                
-                try:
-                    json_start = full_content.find('{')
-                    json_end = full_content.rfind('}') + 1
-                    decision_json = json.loads(full_content[json_start:json_end]) if json_start != -1 and json_end > json_start else {"decision": "ERROR", "raw": full_content}
-                except:
-                    decision_json = {"decision": "ERROR", "raw": full_content}
-                
-                save_discussion_log(session_id, {"session_id": session_id, "stock_code": request.stock_code, "user_prompt": request.user_prompt, "final_decision": decision_json, "all_messages": agent_messages, "total_rounds": request.max_rounds})
-            else:
-                stock_info = ""
-                if request.stock_data:
-                    sd = request.stock_data
-                    stock_info = f"\n\n【股票数据】\n股票代码: {request.stock_code}\n"
-                    if sd.get("daily_data"):
-                        stock_info += "\n最近交易日数据:\n"
-                        for d in sd["daily_data"][:5]:
-                            stock_info += f"  {d['date']}: 开盘={d['open']}, 收盘={d['close']}, 最高={d['high']}, 最低={d['low']}, 成交量={d['volume']}\n"
-                    if sd.get("fundamental_data"):
-                        stock_info += "\n财务数据:\n"
-                        for f in sd["fundamental_data"][:1]:
-                            stock_info += f"  营收={f['revenue']}, 利润={f['profit']}, 净利润={f['net_profit']}\n"
-                
-                context = ""
-                for prev_agent_id in request.agent_ids[:i]:
-                    if agent_messages[prev_agent_id]:
-                        prev_agent = get_agent_by_id(prev_agent_id)
-                        context += f"\n【{prev_agent['name']}】说:\n{agent_messages[prev_agent_id][-1]}\n"
-                
-                current_prompt = f"以下是之前的讨论内容:\n{context}{stock_info}\n\n请基于以上内容，发表你的专业分析。" if context else f"请基于以下主题{stock_info}发表专业分析: {request.user_prompt}"
-                
-                full_content = ""
-                async for chunk in call_llm_stream(agent["system_prompt"], current_prompt):
-                    if chunk["type"] == "chunk":
-                        full_content += chunk["content"]
-                        yield f"data: {json.dumps({'type': 'chunk', 'content': chunk['content'], 'agent': agent['name'], 'round': round_num + 1})}\n\n"
-                    else:
-                        total_tokens = len(full_content) // 4
-                        agent_messages[agent_id].append(full_content)
-                        yield f"data: {json.dumps({'type': 'done', 'content': full_content, 'agent': agent['name'], 'tokens': total_tokens})}\n\n"
+
+    async def event_generator() -> AsyncIterator[str]:
+        for round_num in range(request.max_rounds):
+            for i, agent_id in enumerate(request.agent_ids):
+                agent = get_agent_by_id(agent_id)
+                if not agent:
+                    continue
+
+                is_final = (round_num == request.max_rounds - 1) and (i == len(request.agent_ids) - 1)
+
+                if is_final:
+                    stock_info = ""
+                    if request.stock_data:
+                        sd = request.stock_data
+                        stock_info = f"\n\n【股票数据】\n股票代码: {request.stock_code}\n"
+
+                        if sd.get("daily_data"):
+                            stock_info += "\n最近交易日数据:\n"
+                            for d in sd["daily_data"][:5]:
+                                stock_info += f"  {d['date']}: 开盘={d['open']}, 最高={d['high']}, 最低={d['low']}, 收盘={d['close']}, 成交量={d['volume']}, 换手率={d['turnover']}%\n"
+
+                        if sd.get("fundamental_data"):
+                            stock_info += "\n财务数据:\n"
+                            for f in sd["fundamental_data"][:2]:
+                                stock_info += f"  {f['ann_date']}: 营收={f['revenue']}, 利润={f['profit']}, 净利润={f['net_profit']}, 总资产={f['assets']}, 总负债={f['liabilities']}\n"
+
+                    summary_prompt = f"请总结以上所有分析师的意见，并给出最终的投资决策。{stock_info}\n\n"
+                    for aid in request.agent_ids:
+                        if agent_messages[aid]:
+                            a = get_agent_by_id(aid)
+                            summary_prompt += f"\n【{a['name']}】的观点:\n{agent_messages[aid][-1]}\n"
+                    summary_prompt += f"\n\n股票代码: {request.stock_code or '未指定'}\n\n请以JSON格式输出决策，格式如下:\n{{\"decision\": \"BUY/HOLD/SELL\", \"confidence\": 0.85, \"summary\": \"决策理由摘要\"}}\n\n请确保输出是合法的JSON格式。"
+
+                    full_content = ""
+                    async for chunk in call_llm_stream(agent["system_prompt"], summary_prompt):
+                        if chunk["type"] == "chunk":
+                            full_content += chunk["content"]
+                            data = {'type': 'chunk', 'content': chunk['content'], 'agent': agent['name'], 'round': round_num + 1}
+                            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                        else:
+                            total_tokens = len(full_content) // 4
+                            data = {'type': 'done', 'content': full_content, 'agent': agent['name'], 'tokens': total_tokens}
+                            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+                    try:
+                        json_start = full_content.find('{')
+                        json_end = full_content.rfind('}') + 1
+                        decision_json = json.loads(full_content[json_start:json_end]) if json_start != -1 and json_end > json_start else {"decision": "ERROR", "raw": full_content}
+                    except:
+                        decision_json = {"decision": "ERROR", "raw": full_content}
+
+                    save_discussion_log(session_id, {"session_id": session_id, "stock_code": request.stock_code, "user_prompt": request.user_prompt, "final_decision": decision_json, "all_messages": agent_messages, "total_rounds": request.max_rounds})
+                else:
+                    stock_info = ""
+                    if request.stock_data:
+                        sd = request.stock_data
+                        stock_info = f"\n\n【股票数据】\n股票代码: {request.stock_code}\n"
+                        if sd.get("daily_data"):
+                            stock_info += "\n最近交易日数据:\n"
+                            for d in sd["daily_data"][:5]:
+                                stock_info += f"  {d['date']}: 开盘={d['open']}, 收盘={d['close']}, 最高={d['high']}, 最低={d['low']}, 成交量={d['volume']}\n"
+                        if sd.get("fundamental_data"):
+                            stock_info += "\n财务数据:\n"
+                            for f in sd["fundamental_data"][:1]:
+                                stock_info += f"  营收={f['revenue']}, 利润={f['profit']}, 净利润={f['net_profit']}\n"
+
+                    context = ""
+                    for prev_agent_id in request.agent_ids[:i]:
+                        if agent_messages[prev_agent_id]:
+                            prev_agent = get_agent_by_id(prev_agent_id)
+                            context += f"\n【{prev_agent['name']}】说:\n{agent_messages[prev_agent_id][-1]}\n"
+
+                    current_prompt = f"以下是之前的讨论内容:\n{context}{stock_info}\n\n请基于以上内容，发表你的专业分析。" if context else f"请基于以下主题{stock_info}发表专业分析: {request.user_prompt}"
+
+                    full_content = ""
+                    async for chunk in call_llm_stream(agent["system_prompt"], current_prompt):
+                        if chunk["type"] == "chunk":
+                            full_content += chunk["content"]
+                            data = {'type': 'chunk', 'content': chunk['content'], 'agent': agent['name'], 'round': round_num + 1}
+                            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                        else:
+                            total_tokens = len(full_content) // 4
+                            agent_messages[agent_id].append(full_content)
+                            data = {'type': 'done', 'content': full_content, 'agent': agent['name'], 'tokens': total_tokens}
+                            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/api/discussions")
 async def get_discussions():
