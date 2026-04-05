@@ -144,6 +144,19 @@ async def serve_frontend(filepath: str):
 async def get_agents():
     return get_all_agents_sorted()
 
+@app.post("/api/agents")
+async def create_agent(agent: AgentPromptUpdate):
+    data = load_agents()
+    max_id = max((a["id"] for a in data["agents"]), default=0)
+    new_agent = {
+        "id": max_id + 1,
+        "name": agent.name,
+        "system_prompt": agent.system_prompt
+    }
+    data["agents"].append(new_agent)
+    save_agents(data)
+    return new_agent
+
 @app.put("/api/agents/{agent_id}")
 async def update_agent(agent_id: int, update: AgentPromptUpdate):
     data = load_agents()

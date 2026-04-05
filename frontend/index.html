@@ -236,8 +236,37 @@
         </div>
         
         <div class="agent-panel">
-            <h6><i class="bi bi-people"></i> 智能体列表</h6>
+            <h6><i class="bi bi-people"></i> 智能体列表
+                <button class="btn btn-sm btn-primary ms-auto" onclick="showAddAgentModal()">
+                    <i class="bi bi-plus"></i> 新增
+                </button>
+            </h6>
             <div id="agentList"></div>
+        </div>
+    </div>
+    
+    <div class="modal fade" id="addModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-plus"></i> 新增智能体</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="config-row">
+                        <label class="form-label">智能体名称</label>
+                        <input type="text" class="form-control" id="addAgentName">
+                    </div>
+                    <div class="config-row">
+                        <label class="form-label">System Prompt</label>
+                        <textarea class="form-control" id="addAgentPrompt" rows="10"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" onclick="addAgent()">添加</button>
+                </div>
+            </div>
         </div>
     </div>
     
@@ -272,68 +301,6 @@
         let editAgentId = null;
         let isDiscussing = false;
         let editModal = null;
-        
-        async function loadAgents() {
-            const res = await fetch('/api/agents');
-            agents = await res.json();
-            renderAgentList();
-            populateSelects();
-        }
-        
-        function renderAgentList() {
-            const list = document.getElementById('agentList');
-            list.innerHTML = agents.map(agent => `
-                <div class="agent-card">
-                    <h6>
-                        <i class="bi bi-person-badge"></i>
-                        ${agent.name}
-                        <button class="btn btn-sm btn-outline-primary btn-edit-agent ms-auto" onclick="editAgent('${agent.id}')">
-                            <i class="bi bi-pencil"></i> 编辑
-                        </button>
-                    </h6>
-                    <div class="agent-prompt">${agent.system_prompt}</div>
-                </div>
-            `).join('');
-        }
-        
-        function populateSelects() {
-            const selects = ['agent1', 'agent2', 'agent3', 'agent4'];
-            const defaultAgents = ['fundamental_analyst', 'technical_analyst', 'sentiment_analyst', 'risk_controller'];
-            
-            selects.forEach((selectId, index) => {
-                const select = document.getElementById(selectId);
-                select.innerHTML = '<option value="">选择Agent</option>' + 
-                    agents.map(a => `<option value="${a.id}" ${defaultAgents[index] === a.id ? 'selected' : ''}>${a.name}</option>`).join('');
-            });
-        }
-        
-        function editAgent(agentId) {
-            const agent = agents.find(a => a.id === agentId);
-            if (!agent) return;
-            
-            editAgentId = agentId;
-            document.getElementById('editAgentName').value = agent.name;
-            document.getElementById('editAgentPrompt').value = agent.system_prompt;
-            
-            if (!editModal) {
-                editModal = new bootstrap.Modal(document.getElementById('editModal'));
-            }
-            editModal.show();
-        }
-        
-        async function saveAgent() {
-            const name = document.getElementById('editAgentName').value;
-            const system_prompt = document.getElementById('editAgentPrompt').value;
-            
-            await fetch(`/api/agents/${editAgentId}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ agent_id: editAgentId, name, system_prompt })
-            });
-            
-            editModal.hide();
-            loadAgents();
-        }
         
         async function loadAgents() {
             try {
@@ -381,23 +348,23 @@
         }
         
         function renderAgentSelects() {
-            const container = document.getElementById('agentSelects');
+            const selects = ['agent1', 'agent2', 'agent3', 'agent4'];
             const defaultAgents = [1, 2, 3, 4];
             
-            container.innerHTML = agents.slice(0, 4).map((agent, index) => `
-                <div class="input-group" style="width: 200px;">
-                    <span class="input-group-text">Agent ${index + 1}</span>
-                    <select class="form-select" id="agent${index + 1}">
-                        ${agents.map(a => `<option value="${a.id}" ${defaultAgents[index] === a.id ? 'selected' : ''}>${a.name}</option>`).join('')}
-                    </select>
-                </div>
-            `).join('');
+            selects.forEach((selectId, index) => {
+                const select = document.getElementById(selectId);
+                if (select) {
+                    select.innerHTML = '<option value="">选择Agent</option>' + 
+                        agents.map(a => `<option value="${a.id}" ${defaultAgents[index] === a.id ? 'selected' : ''}>${a.name}</option>`).join('');
+                }
+            });
         }
         
         function editAgent(agentId) {
             const agent = agents.find(a => a.id === agentId);
             if (!agent) return;
             
+            editAgentId = agentId;
             document.getElementById('editAgentId').value = agent.id;
             document.getElementById('editAgentName').value = agent.name;
             document.getElementById('editAgentPrompt').value = agent.system_prompt;
