@@ -135,8 +135,8 @@ async def call_llm_stream(system_prompt: str, user_prompt: str, include_reasonin
         async with httpx.AsyncClient(timeout=180.0) as client:
             async with client.stream("POST", f"{base_url}/chat/completions", headers=headers, json=payload) as response:
                 if response.status_code != 200:
-                    error_text = await response.text()
-                    raise HTTPException(status_code=response.status_code, detail=f"OpenRouter API error: {error_text}")
+                    error_text = await response.aread()
+                    raise HTTPException(status_code=response.status_code, detail=f"OpenRouter API error: {error_text.decode('utf-8')}")
                 content = ""
                 async for line in response.aiter_lines():
                     if line.startswith("data: "):
@@ -149,8 +149,9 @@ async def call_llm_stream(system_prompt: str, user_prompt: str, include_reasonin
                             if delta:
                                 content += delta
                                 yield {"type": "chunk", "content": delta}
-                        except:
-                            pass
+                        except Exception as e:
+                            print(f"[WARN] Parse error: {e}")
+                            continue
                 yield {"type": "done", "content": content}
     except Exception as e:
         print(f"[ERROR] call_llm_stream: {type(e).__name__}: {str(e)}")

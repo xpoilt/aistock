@@ -36,6 +36,13 @@ function App() {
   const [loadingData, setLoadingData] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
+  // 解码Unicode字符
+  const decodeUnicode = (str: string) => {
+    return str.replace(/\u[0-9a-fA-F]{4}/g, (match) => {
+      return String.fromCharCode(parseInt(match.slice(2), 16));
+    });
+  }
+
   useEffect(() => {
     fetchAgents()
   }, [])
@@ -111,34 +118,66 @@ function App() {
       const decoder = new TextDecoder()
       let fullContent = ''
       let currentAgent = ''
+      let buffer = ''
 
+      console.log('开始处理流式响应...')
+      
       while (true) {
         const { done, value } = await reader!.read()
-        if (done) break
+        if (done) {
+          console.log('流式响应结束')
+          break
+        }
 
-        const chunk = decoder.decode(value)
-        const lines = chunk.split('\n')
+        // 解码chunk并添加到缓冲区
+        const chunk = decoder.decode(value, { stream: true })
+        buffer += chunk
+        
+        console.log('收到chunk:', chunk)
+        
+        // 按行分割处理
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''  // 保留不完整的行
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             try {
-              const data = JSON.parse(line.slice(6))
+              // 提取JSON数据
+              const jsonStr = line.slice(6).trim()
+              console.log('解析JSON字符串:', jsonStr)
+              
+              const data = JSON.parse(jsonStr)
+              console.log('解析到数据:', data)
+              
               if (data.type === 'chunk') {
                 fullContent += data.content
                 currentAgent = data.agent
-                setCurrentStreaming(fullContent)
+                console.log('更新流式内容:', data.content)
+                setCurrentStreaming(prev => {
+                  const newContent = prev + data.content;
+                  console.log('currentStreaming更新为:', newContent);
+                  return newContent;
+                });
               } else if (data.type === 'done') {
-                setMessages(prev => [...prev, {
-                  id: Date.now().toString(),
-                  agent: currentAgent || data.agent,
-                  content: fullContent,
-                  timestamp: new Date()
-                }])
-                fullContent = ''
-                setCurrentStreaming('')
+                console.log('完成消息:', { agent: currentAgent, content: fullContent });
+                setMessages(prev => {
+                  const newMessages = [...prev, {
+                    id: Date.now().toString(),
+                    agent: currentAgent || data.agent,
+                    content: fullContent,
+                    timestamp: new Date()
+                  }];
+                  console.log('messages更新为:', newMessages);
+                  return newMessages;
+                });
+                // 延迟清空以确保内容显示
+                setTimeout(() => {
+                  fullContent = '';
+                  setCurrentStreaming('');
+                }, 300);
               }
             } catch (e) {
-              // ignore parse errors
+              console.error('解析错误:', e, '行内容:', line)
             }
           }
         }
@@ -256,19 +295,19 @@ function App() {
                       <Text strong>{msg.agent}</Text>
                     </div>
                     <div className="message-content">
-                      {msg.content}
+                      {decodeUnicode(msg.content)}
                     </div>
                   </div>
                 ))}
 
                 {currentStreaming && (
-                  <div className="message-item streaming">
+                  <div className="message-item streaming" style={{border: '2px solid #1890ff', backgroundColor: '#e6f7ff'}}>
                     <div className="message-header">
                       <Text strong>正在生成...</Text>
                       <Spin size="small" />
                     </div>
-                    <div className="message-content">
-                      {currentStreaming}
+                    <div className="message-content" style={{whiteSpace: 'pre-wrap'}}>
+                      {decodeUnicode(currentStreaming)}
                     </div>
                   </div>
                 )}
