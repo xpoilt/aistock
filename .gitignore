@@ -13,3 +13,5 @@ venv/
 *.swo
 *.db
 .DS_Store
+*.env
+*.md

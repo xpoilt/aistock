@@ -123,13 +123,16 @@ class StockCollector:
     
     def get_financial_indicator(self, stock_code: str) -> List[Dict]:
         try:
-            df = ak.stock_financial_analysis_indicator(symbol=stock_code)
+            df = ak.stock_financial_analysis_indicator_em(
+                symbol=stock_code,
+                indicator="按报告期"
+            )
             
             records = []
             for _, row in df.head(8).iterrows():
                 records.append({
                     'stock_code': stock_code,
-                    'report_date': str(row.get('日期', '')),
+                    'report_date': str(row.get('报告日期', '')),
                     'eps': row.get('基本每股收益'),
                     'roe': row.get('净资产收益率(%)'),
                     'pe': row.get('市盈率(倍)'),
@@ -166,7 +169,10 @@ class StockCollector:
     
     def get_profitability(self, stock_code: str) -> List[Dict]:
         try:
-            df = ak.stock_profit_sheet_by_report_em(symbol=stock_code)
+            market_prefix = "SH" if stock_code.startswith('6') else "SZ"
+            df = ak.stock_profit_sheet_by_yearly_em(
+                symbol=f"{market_prefix}{stock_code}"
+            )
             
             records = []
             for _, row in df.head(8).iterrows():
@@ -206,7 +212,10 @@ class StockCollector:
     
     def get_growth_ability(self, stock_code: str) -> List[Dict]:
         try:
-            df = ak.stock_growth_em(symbol=stock_code)
+            df = ak.stock_growth_analyze_em(
+                symbol=stock_code,
+                indicator="按报告期"
+            )
             
             records = []
             for _, row in df.head(8).iterrows():
