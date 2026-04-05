@@ -60,11 +60,11 @@ def load_agents() -> Dict:
         }
         save_agents(default_agents)
         return default_agents
-    with open(AGENTS_FILE, "r", encoding="utf-8") as f:
+    with open(AGENTS_FILE, "r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 def save_agents(data: Dict):
-    with open(AGENTS_FILE, "w", encoding="utf-8") as f:
+    with open(AGENTS_FILE, "w", encoding="utf-8-sig") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def get_agent_by_id(agent_id: int) -> Optional[Dict]:
@@ -81,10 +81,10 @@ def get_all_agents_sorted() -> List[Dict]:
 def save_discussion_log(session_id: str, discussion_data: Dict):
     logs = []
     if DISCUSSIONS_LOG.exists():
-        with open(DISCUSSIONS_LOG, "r", encoding="utf-8") as f:
+        with open(DISCUSSIONS_LOG, "r", encoding="utf-8-sig") as f:
             logs = json.load(f)
     logs.append({"session_id": session_id, "timestamp": datetime.now().isoformat(), **discussion_data})
-    with open(DISCUSSIONS_LOG, "w", encoding="utf-8") as f:
+    with open(DISCUSSIONS_LOG, "w", encoding="utf-8-sig") as f:
         json.dump(logs, f, ensure_ascii=False, indent=2)
 
 async def call_llm_stream(system_prompt: str, user_prompt: str, include_reasoning: bool = False):
@@ -103,35 +103,50 @@ async def call_llm_stream(system_prompt: str, user_prompt: str, include_reasonin
         "X-Title": os.getenv("OPENROUTER_APP_NAME", "AIStock")
     }
     
-    payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], "stream": True, "temperature": temperature}
+    payload = {
+        "model": model, 
+        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], 
+        "stream": True, 
+        "temperature": temperature
+    }
     
     if include_reasoning:
-        payload["reasoning"] = {"type": "enabled"}
+        payload["extra_body"] = {"reasoning": {"enabled": True}}
     
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        async with client.stream("POST", f"{base_url}/chat/completions", headers=headers, json=payload) as response:
-            if response.status_code != 200:
-                error_text = await response.text()
-                raise HTTPException(status_code=response.status_code, detail=f"OpenRouter API error: {error_text}")
-            content = ""
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        json_data = json.loads(data)
-                        delta = json_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                        if delta:
-                            content += delta
-                            yield {"type": "chunk", "content": delta}
-                    except:
-                        pass
-            yield {"type": "done", "content": content}
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            async with client.stream("POST", f"{base_url}/chat/completions", headers=headers, json=payload) as response:
+                if response.status_code != 200:
+                    error_text = await response.text()
+                    raise HTTPException(status_code=response.status_code, detail=f"OpenRouter API error: {error_text}")
+                content = ""
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data = line[6:]
+                        if data == "[DONE]":
+                            break
+                        try:
+                            json_data = json.loads(data)
+                            delta = json_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if delta:
+                                content += delta
+                                yield {"type": "chunk", "content": delta}
+                        except:
+                            pass
+                yield {"type": "done", "content": content}
+    except Exception as e:
+        print(f"[ERROR] call_llm_stream: {type(e).__name__}: {str(e)}")
+        raise
 
 @app.get("/")
 async def root():
-    return {"message": "AIStock Multi-Agent API", "version": "1.0.0"}
+    return {
+        "message": "AIStock Multi-Agent API", 
+        "version": "1.0.0",
+        "base_dir": str(BASE_DIR),
+        "agents_file_exists": AGENTS_FILE.exists(),
+        "env_file_exists": ENV_FILE.exists()
+    }
 
 @app.get("/frontend/{filepath}")
 async def serve_frontend(filepath: str):
