@@ -39,16 +39,16 @@ const getAgentInitials = (name: string): string => {
   return name.slice(0, 2)
 }
 
-const API_BASE = 'http://127.0.0.1:8003'
+const API_BASE = 'http://127.0.0.1:8004'
 
 function AppContent() {
   const [agents, setAgents] = useState<Agent[]>([])
-  const [selectedAgentA, setSelectedAgentA] = useState<number | null>(null)
-  const [selectedAgentB, setSelectedAgentB] = useState<number | null>(null)
-  const [selectedAgentC, setSelectedAgentC] = useState<number | null>(null)
-  const [selectedAgentD, setSelectedAgentD] = useState<number | null>(null)
-  const [selectedAgentE, setSelectedAgentE] = useState<number | null>(null)
-  const [selectedAgentF, setSelectedAgentF] = useState<number | null>(null)
+  const [selectedAgentA, setSelectedAgentA] = useState<number | null>(3)
+  const [selectedAgentB, setSelectedAgentB] = useState<number | null>(1)
+  const [selectedAgentC, setSelectedAgentC] = useState<number | null>(2)
+  const [selectedAgentD, setSelectedAgentD] = useState<number | null>(4)
+  const [selectedAgentE, setSelectedAgentE] = useState<number | null>(5)
+  const [selectedAgentF, setSelectedAgentF] = useState<number | null>(5)
   const [stockCode, setStockCode] = useState('')
   const [userPrompt, setUserPrompt] = useState('')
   const [debateRounds, setDebateRounds] = useState(3)
@@ -78,9 +78,12 @@ function AppContent() {
 
   useEffect(() => {
     console.log('📊 messages 状态更新:', messages.length, '条')
-    messages.forEach((msg, i) => {
-      console.log(`   [${i}] ${msg.agent} (${msg.agentKey}): ${msg.content.substring(0, 30)}...`)
-    })
+    if (messages.length > 0) {
+      console.log('   已保存的消息列表:')
+      messages.forEach((msg, i) => {
+        console.log(`   [${i}] ${msg.agent} (${msg.agentKey}): ${msg.content.substring(0, 40)}...`)
+      })
+    }
   }, [messages])
 
   useEffect(() => {
@@ -176,29 +179,13 @@ function AppContent() {
 
         buffer += decoder.decode(value, { stream: true })
 
-        let cleanedBuffer = buffer
-          .replace(/\\\\n/g, '\n')
-          .replace(/\\\\r/g, '\r')
-          .replace(/\\"/g, '"')
-
-        const events = cleanedBuffer.split('\n\n')
+        const events = buffer.split('\n\n')
         buffer = events.pop() || ''
 
         for (const event of events) {
-          let trimmed = event.trim()
-          if (!trimmed) continue
+          let jsonStr = event.trim()
+          if (!jsonStr) continue
 
-          if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-            trimmed = trimmed.slice(1, -1)
-          }
-
-          trimmed = trimmed
-            .replace(/\\"/g, '"')
-            .replace(/\\n/g, '\n')
-            .replace(/\\r/g, '\r')
-            .replace(/\\\\/g, '\\')
-
-          let jsonStr = trimmed
           if (jsonStr.startsWith('data: ')) {
             jsonStr = jsonStr.slice(6)
           }
@@ -241,12 +228,16 @@ function AppContent() {
                   content: fullContent,
                   timestamp: new Date()
                 }
+                console.log('💾 准备保存消息:', newMessage.agent, newMessage.agentKey, '内容长度:', fullContent.length)
                 setMessages(prev => {
                   const updated = [...prev, newMessage]
-                  console.log('💾 消息已保存，当前消息数:', updated.length)
+                  console.log('✅ 消息已保存到数组，当前消息数:', updated.length)
+                  console.log('   已保存的消息列表:')
+                  updated.forEach((msg, idx) => {
+                    console.log(`   [${idx}] ${msg.agent} (${msg.agentKey})`)
+                  })
                   return updated
                 })
-                console.log('💾 准备保存:', { agent: currentAgentName, key: currentAgentLabel, length: fullContent.length })
               }
               fullContent = ''
               setCurrentStreaming('')

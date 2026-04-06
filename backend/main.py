@@ -353,7 +353,7 @@ async def discuss(request: DiscussionRequest):
                     pass
 
         for round_num in range(request.debate_rounds):
-            prompt_e_rebuttal = f"你是{agent_e['name']}。\n\n这是第{parseInt(round_num) + 1}轮讨论。\n\n{agent_d['name']}的最新观点：\n{d_content}\n\n{agent_e['name']}之前的评论：\n{e_content}\n\n{build_abc_context()}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请继续批判性地回应{agent_d['name']}的观点。"
+            prompt_e_rebuttal = f"你是{agent_e['name']}。\n\n这是第{round_num + 1}轮讨论。\n\n{agent_d['name']}的最新观点：\n{d_content}\n\n{agent_e['name']}之前的评论：\n{e_content}\n\n{build_abc_context()}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请继续批判性地回应{agent_d['name']}的观点。"
             e_prev = e_content
             async for chunk_data in call_agent_stream(agent_e, prompt_e_rebuttal, 'E'):
                 yield chunk_data
@@ -365,7 +365,7 @@ async def discuss(request: DiscussionRequest):
                     except:
                         pass
 
-            prompt_d_response = f"你是{agent_d['name']}。\n\n这是第{parseInt(round_num) + 1}轮讨论。\n\n{agent_e['name']}对你的最新回应：\n{e_content}\n\n你之前的观点：\n{d_content}\n\n{build_abc_context()}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请回应{agent_e['name']}的评论，维护或修正你的立场。"
+            prompt_d_response = f"你是{agent_d['name']}。\n\n这是第{round_num + 1}轮讨论。\n\n{agent_e['name']}对你的最新回应：\n{e_content}\n\n你之前的观点：\n{d_content}\n\n{build_abc_context()}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请回应{agent_e['name']}的评论，维护或修正你的立场。"
             d_prev = d_content
             async for chunk_data in call_agent_stream(agent_d, prompt_d_response, 'D'):
                 yield chunk_data
