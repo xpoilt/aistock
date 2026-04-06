@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { ConfigProvider, Input, Select, Button, Card, List, Typography, Space, Spin, Badge, App, message } from 'antd'
+import { ConfigProvider, Input, Select, Button, Card, List, Typography, Space, Spin, Badge, message, Checkbox } from 'antd'
 import { RobotOutlined, SendOutlined } from '@ant-design/icons'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -39,7 +39,7 @@ const getAgentInitials = (name: string): string => {
   return name.slice(0, 2)
 }
 
-const API_BASE = 'http://127.0.0.1:8004'
+const API_BASE = 'http://127.0.0.1:8000'
 
 function AppContent() {
   const [agents, setAgents] = useState<Agent[]>([])
@@ -52,6 +52,7 @@ function AppContent() {
   const [stockCode, setStockCode] = useState('')
   const [userPrompt, setUserPrompt] = useState('')
   const [debateRounds, setDebateRounds] = useState(3)
+  const [enableWebSearch, setEnableWebSearch] = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
   const [currentStreaming, setCurrentStreaming] = useState<string>('')
@@ -60,6 +61,7 @@ function AppContent() {
   const [stockData, setStockData] = useState<any>(null)
   const [loadingData, setLoadingData] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
 
   const decodeUnicode = (str: string): string => {
     if (!str) return '';
@@ -87,7 +89,13 @@ function AppContent() {
   }, [messages])
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const container = messagesContainerRef.current
+    if (!container) return
+
+    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100
+    if (isNearBottom) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
   }, [messages, currentStreaming])
 
   const fetchStockData = async () => {
@@ -152,7 +160,8 @@ function AppContent() {
           agent_e: selectedAgentE,
           agent_f: selectedAgentF,
           debate_rounds: debateRounds,
-          stock_data: stockData || undefined
+          stock_data: stockData || undefined,
+          enable_web_search: enableWebSearch
         })
       })
 
@@ -265,8 +274,7 @@ function AppContent() {
 
   return (
     <ConfigProvider theme={{ token: { colorPrimary: '#1677ff' } }}>
-      <App>
-        <div className="app-container">
+      <div className="app-container">
           <header className="app-header">
             <Title level={3}><RobotOutlined /> AIStock 多智能体讨论系统</Title>
           </header>
@@ -389,6 +397,12 @@ function AppContent() {
                   />
                 </div>
 
+                <div>
+                  <Checkbox checked={enableWebSearch} onChange={e => setEnableWebSearch(e.target.checked)}>
+                    开启互联网查询（使用最新信息分析）
+                  </Checkbox>
+                </div>
+
                 <Button
                   type="primary"
                   icon={<SendOutlined />}
@@ -421,7 +435,7 @@ function AppContent() {
                 {loading && <Badge status="processing" text="讨论进行中..." />}
               </Space>
             }>
-              <div className="messages-container">
+              <div className="messages-container" ref={messagesContainerRef}>
                 {messages.length === 0 && !currentStreaming && (
                   <div className="empty-state">
                     <RobotOutlined style={{ fontSize: 48, color: '#ccc' }} />
@@ -480,7 +494,6 @@ function AppContent() {
             </Card>
           </div>
         </div>
-      </App>
     </ConfigProvider>
   )
 }

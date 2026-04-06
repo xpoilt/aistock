@@ -53,6 +53,7 @@ class DiscussionRequest(BaseModel):
     agent_f: int
     debate_rounds: int = 3
     stock_data: Optional[Dict] = None
+    enable_web_search: bool = False
 
 class AgentPromptUpdate(BaseModel):
     agent_id: int
@@ -99,7 +100,7 @@ def save_discussion_log(session_id: str, discussion_data: Dict):
     with open(DISCUSSIONS_LOG, "w", encoding="utf-8-sig") as f:
         json.dump(logs, f, ensure_ascii=False, indent=2)
 
-async def call_llm_stream(system_prompt: str, user_prompt: str, include_reasoning: bool = False):
+async def call_llm_stream(system_prompt: str, user_prompt: str, include_reasoning: bool = False, enable_web_search: bool = False):
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=500, detail="OpenRouter API key not configured. Please set OPENAI_API_KEY in .env file")
@@ -111,6 +112,9 @@ async def call_llm_stream(system_prompt: str, user_prompt: str, include_reasonin
     # 添加当前日期时间到 system prompt
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     system_prompt_with_time = f"{system_prompt}\n\n当前时间：{current_time}"
+    
+    if enable_web_search:
+        system_prompt_with_time += "\n\n【重要提示】用户已开启互联网查询模式，请尽可能基于最新的市场信息和新闻进行分析，确保你的观点和数据是最新的。"
     
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -133,6 +137,7 @@ async def call_llm_stream(system_prompt: str, user_prompt: str, include_reasonin
     print(f"[LLM REQUEST] Model: {model}")
     print(f"[LLM REQUEST] Temperature: {temperature}")
     print(f"[LLM REQUEST] Include Reasoning: {include_reasoning}")
+    print(f"[LLM REQUEST] Enable Web Search: {enable_web_search}")
     print(f"[LLM REQUEST] Current Time: {current_time}")
     print(f"\n[LLM REQUEST] System Prompt:\n{system_prompt_with_time[:500]}{'...' if len(system_prompt_with_time) > 500 else ''}")
     print(f"\n[LLM REQUEST] User Prompt:\n{user_prompt[:500]}{'...' if len(user_prompt) > 500 else ''}")
@@ -213,8 +218,11 @@ async def update_agent(agent_id: int, update: AgentPromptUpdate):
 async def discuss(request: DiscussionRequest):
     import uuid
     print(f"[DISCUSS] Received request: user_prompt={request.user_prompt[:50] if request.user_prompt else 'None'}...")
+    print(f"[DISCUSS] Enable Web Search: {request.enable_web_search}")
     session_id = str(uuid.uuid4())
 
+    print(f"[DISCUSS] 正在获取 agents: A={request.agent_a}, B={request.agent_b}, C={request.agent_c}, D={request.agent_d}, E={request.agent_e}, F={request.agent_f}")
+    
     agent_a = get_agent_by_id(request.agent_a)
     agent_b = get_agent_by_id(request.agent_b)
     agent_c = get_agent_by_id(request.agent_c)
@@ -222,21 +230,34 @@ async def discuss(request: DiscussionRequest):
     agent_e = get_agent_by_id(request.agent_e)
     agent_f = get_agent_by_id(request.agent_f)
 
+    print(f"[DISCUSS] 获取结果: A={agent_a}, B={agent_b}, C={agent_c}, D={agent_d}, E={agent_e}, F={agent_f}")
+    
     if not all([agent_a, agent_b, agent_c, agent_d, agent_e, agent_f]):
         raise HTTPException(status_code=400, detail="One or more agents not found")
 
     stock_info = ""
-    if request.stock_data:
-        sd = request.stock_data
+    
+    if request.stock_code:
         stock_info = f"\n\n【股票数据】\n股票代码: {request.stock_code}\n"
-        if sd.get("daily_data"):
-            stock_info += "\n最近交易日数据:\n"
-            for d in sd["daily_data"][:5]:
-                stock_info += f"  {d['date']}: 开盘={d['open']}, 收盘={d['close']}, 最高={d['high']}, 最低={d['low']}, 成交量={d['volume']}\n"
-        if sd.get("fundamental_data"):
-            stock_info += "\n财务数据:\n"
-            for f in sd["fundamental_data"][:2]:
-                stock_info += f"  营收={f['revenue']}, 利润={f['profit']}, 净利润={f['net_profit']}\n"
+        
+        if request.stock_data:
+            sd = request.stock_data
+            if sd.get("daily_data"):
+                stock_info += "\n最近交易日数据:\n"
+                for d in sd["daily_data"][:5]:
+                    stock_info += f"  {d['date']}: 开盘={d['open']}, 收盘={d['close']}, 最高={d['high']}, 最低={d['low']}, 成交量={d['volume']}\n"
+            if sd.get("fundamental_data"):
+                stock_info += "\n财务数据:\n"
+                for f in sd["fundamental_data"][:2]:
+                    stock_info += f"  营收={f['revenue']}, 利润={f['profit']}, 净利润={f['net_profit']}\n"
+        
+        print(f"[DISCUSS] 正在获取 {request.stock_code} 的基本面数据...")
+        try:
+            fundamental_data = await fetch_stock_fundamental_data(request.stock_code)
+            if fundamental_data:
+                stock_info += f"\n{fundamental_data}"
+        except Exception as e:
+            print(f"[WARN] 获取基本面数据失败，继续流程: {e}")
 
     abc_content = {}
 
@@ -258,9 +279,10 @@ async def discuss(request: DiscussionRequest):
             return ctx
 
         async def call_agent_stream(agent, prompt, agent_label):
+            print(f"[AGENT_STREAM] 开始: {agent['name']} ({agent_label})")
             full_content = ""
             yield f"data: {json.dumps({'type': 'thinking_start', 'agent': agent['name'], 'agent_label': agent_label}, ensure_ascii=False)}\n\n"
-            async for chunk in call_llm_stream(agent["system_prompt"], prompt):
+            async for chunk in call_llm_stream(agent["system_prompt"], prompt, enable_web_search=request.enable_web_search):
                 if chunk["type"] == "chunk":
                     full_content += chunk["content"]
                     data = {'type': 'chunk', 'content': chunk["content"], 'agent': agent['name'], 'agent_label': agent_label}
@@ -314,10 +336,12 @@ async def discuss(request: DiscussionRequest):
                     pass
 
         abc_content['C'] = full_content_c
+        print(f"[DISCUSS] ABC 完成，准备开始 Agent D...")
 
         prompt_d_init = f"你是{agent_d['name']}。\n\n请基于以下三位分析师的观点，进行综合分析并给出初步的投资建议：\n{build_abc_context()}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请综合ABC的意见，给出你的分析和建议（可以同意或反对他们的观点）。"
         d_content = ""
         d_thinking = True
+        print(f"[DISCUSS] 开始调用 Agent D...")
         async for chunk_data in call_agent_stream(agent_d, prompt_d_init, 'D'):
             yield chunk_data
             if chunk_data.startswith("data: "):
@@ -566,41 +590,167 @@ async def fetch_and_save_macro_data():
     conn.commit()
     conn.close()
 
+def get_sse_historical_data(stock_code: str, begin_date: str = "20200101", end_date: str = "20500101"):
+    import requests
+    url = f"http://yunhq.sse.com.cn:32041/v1/sh1/dayk/{stock_code}"
+    
+    params = {
+        "begin": begin_date,
+        "end": end_date,
+        "select": "date,open,high,low,close,volume,amount"
+    }
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.sse.com.cn/",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Origin": "https://www.sse.com.cn"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10, verify=False)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data
+        else:
+            return None
+        
+    except Exception as e:
+        return None
+
+def save_sse_data_to_db(cursor, stock_code: str, data):
+    if not data or "kline" not in data:
+        return 0
+    
+    kline_data = data.get("kline", [])
+    success_count = 0
+    
+    for item in kline_data:
+        if len(item) >= 7:
+            date_int = item[0]
+            open_price = item[1]
+            high = item[2]
+            low = item[3]
+            close = item[4]
+            volume = item[5]
+            amount = item[6]
+            
+            trade_date = str(date_int)
+            
+            try:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO daily_price (stock_code, trade_date, open, high, low, close, volume, amount)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (stock_code, trade_date, open_price, high, low, close, volume, amount))
+                success_count += 1
+            except Exception as e:
+                pass
+    
+    return success_count
+
 async def fetch_and_save_stock_data(stock_code: str):
     import sqlite3
-    import datetime
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     init_db()
     
     conn = sqlite3.connect(str(STOCK_DB))
     cursor = conn.cursor()
     
-    try:
-        import akshare as ak
-        df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", start_date="20240101", end_date="20500101", adjust="")
-        for _, row in df.iterrows():
-            cursor.execute("""
-                INSERT OR REPLACE INTO daily_price (stock_code, trade_date, open, high, low, close, volume, amount)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (stock_code, str(row['日期']), float(row['开盘']), float(row['最高']), float(row['最低']), 
-                  float(row['收盘']), float(row['成交量']), float(row['成交额'])))
-        print(f"[INFO] akshare got {len(df)} records for {stock_code}")
-    except Exception as e:
-        print(f"[WARN] akshare failed, using mock data: {e}")
-        for i in range(30):
-            date = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime('%Y%m%d')
-            cursor.execute("""
-                INSERT OR REPLACE INTO daily_price (stock_code, trade_date, open, high, low, close, volume, amount)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (stock_code, date, 10.0 + i, 10.5 + i, 9.5 + i, 10.2 + i, 1000000 + i * 10000, 10200000 + i * 100000))
+    print(f"[INFO] 正在使用上交所接口获取 {stock_code} 的数据...")
+    
+    success = False
+    for retry in range(3):
+        data = get_sse_historical_data(stock_code, "20240101", "20500101")
+        
+        if data:
+            saved_count = save_sse_data_to_db(cursor, stock_code, data)
+            if saved_count > 0:
+                print(f"[INFO] 上交所接口成功获取 {saved_count} 条记录")
+                success = True
+                break
+            else:
+                if retry < 2:
+                    print(f"[WARN] 未获取到数据，等待 2 秒后重试 ({retry + 1}/3)...")
+                    import time
+                    time.sleep(2)
+        else:
+            if retry < 2:
+                print(f"[WARN] 请求失败，等待 2 秒后重试 ({retry + 1}/3)...")
+                import time
+                time.sleep(2)
+    
+    if not success:
+        print(f"[WARN] 上交所接口获取失败，尝试使用 akshare...")
+        try:
+            import akshare as ak
+            df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", start_date="20240101", end_date="20500101", adjust="")
+            
+            if df is not None and len(df) > 0:
+                print(f"[INFO] akshare 成功获取 {len(df)} 条记录")
+                saved_count = 0
+                for _, row in df.iterrows():
+                    try:
+                        cursor.execute("""
+                            INSERT OR REPLACE INTO daily_price (stock_code, trade_date, open, high, low, close, volume, amount)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (stock_code, str(row['日期']), float(row['开盘']), float(row['最高']), float(row['最低']), 
+                              float(row['收盘']), float(row['成交量']), float(row['成交额'])))
+                        saved_count += 1
+                    except Exception as e:
+                        pass
+                print(f"[INFO] akshare 成功保存 {saved_count} 条记录")
+        except Exception as e:
+            print(f"[ERROR] akshare 也失败: {e}")
     
     conn.commit()
     conn.close()
 
+async def fetch_stock_fundamental_data(stock_code: str) -> str:
+    try:
+        import akshare as ak
+        print(f"[INFO] 正在获取 {stock_code} 的基本面数据...")
+        
+        fundamental_info = []
+        
+        try:
+            df_finance = ak.stock_financial_abstract_ths(symbol=stock_code, indicator="按报告期")
+            if df_finance is not None and len(df_finance) > 0:
+                fundamental_info.append("【财务摘要】")
+                for i, row in df_finance.head(3).iterrows():
+                    fundamental_info.append(f"  报告期: {row.get('报告期', 'N/A')}")
+                    fundamental_info.append(f"  净利润: {row.get('净利润', 'N/A')}")
+                    fundamental_info.append(f"  营业收入: {row.get('营业收入', 'N/A')}")
+        except Exception as e:
+            print(f"[WARN] 获取财务摘要失败: {e}")
+        
+        try:
+            df_valuation = ak.stock_individual_info_em(symbol=stock_code)
+            if df_valuation is not None and len(df_valuation) > 0:
+                fundamental_info.append("\n【估值信息】")
+                for i, row in df_valuation.head(5).iterrows():
+                    fundamental_info.append(f"  {row.get('item', '')}: {row.get('value', '')}")
+        except Exception as e:
+            print(f"[WARN] 获取估值信息失败: {e}")
+        
+        if len(fundamental_info) > 0:
+            result = "\n".join(fundamental_info)
+            print(f"[INFO] 成功获取 {stock_code} 的基本面数据")
+            return result
+        else:
+            print(f"[WARN] 未获取到 {stock_code} 的基本面数据")
+            return ""
+    except Exception as e:
+        print(f"[ERROR] 获取基本面数据失败: {e}")
+        return ""
+
 @app.post("/api/stock/{stock_code}")
 async def fetch_stock_data(stock_code: str):
     try:
-        fetch_and_save_stock_data(stock_code)
+        await fetch_and_save_stock_data(stock_code)
         
         import sqlite3
         conn = sqlite3.connect(str(STOCK_DB))
@@ -696,7 +846,7 @@ async def get_stock_data_from_db(stock_code: str):
         
         conn.close()
         
-        if not daily_data and not fundamental_data:
+        if not daily_data:
             return {"error": f"未找到股票 {stock_code} 的数据"}
         
         return {
@@ -763,7 +913,7 @@ async def collect_stock_data(stock_code: str):
         
         conn.close()
         
-        if not daily_data and not fundamental_data:
+        if not daily_data:
             return {"error": f"未找到股票 {stock_code} 的数据"}
         
         return {
