@@ -26,7 +26,9 @@ def load_env():
                 if line and not line.startswith("#"):
                     if "=" in line:
                         key, value = line.split("=", 1)
-                        os.environ.setdefault(key.strip(), value.strip())
+                        os.environ[key.strip()] = value.strip()
+        print(f"[ENV] Loaded environment variables from {ENV_FILE}")
+        print(f"[ENV] OPENAI_API_KEY: {'SET' if os.getenv('OPENAI_API_KEY') else 'NOT SET'}")
 
 load_env()
 
@@ -43,8 +45,13 @@ app.add_middleware(
 class DiscussionRequest(BaseModel):
     user_prompt: str
     stock_code: Optional[str] = None
-    agent_ids: List[int]
-    max_rounds: int = 4
+    agent_a: int
+    agent_b: int
+    agent_c: int
+    agent_d: int
+    agent_e: int
+    agent_f: int
+    debate_rounds: int = 3
     stock_data: Optional[Dict] = None
 
 class AgentPromptUpdate(BaseModel):
@@ -205,93 +212,192 @@ async def update_agent(agent_id: int, update: AgentPromptUpdate):
 @app.post("/api/discuss")
 async def discuss(request: DiscussionRequest):
     import uuid
+    print(f"[DISCUSS] Received request: user_prompt={request.user_prompt[:50] if request.user_prompt else 'None'}...")
     session_id = str(uuid.uuid4())
-    agent_messages = {agent_id: [] for agent_id in request.agent_ids}
+
+    agent_a = get_agent_by_id(request.agent_a)
+    agent_b = get_agent_by_id(request.agent_b)
+    agent_c = get_agent_by_id(request.agent_c)
+    agent_d = get_agent_by_id(request.agent_d)
+    agent_e = get_agent_by_id(request.agent_e)
+    agent_f = get_agent_by_id(request.agent_f)
+
+    if not all([agent_a, agent_b, agent_c, agent_d, agent_e, agent_f]):
+        raise HTTPException(status_code=400, detail="One or more agents not found")
+
+    stock_info = ""
+    if request.stock_data:
+        sd = request.stock_data
+        stock_info = f"\n\n【股票数据】\n股票代码: {request.stock_code}\n"
+        if sd.get("daily_data"):
+            stock_info += "\n最近交易日数据:\n"
+            for d in sd["daily_data"][:5]:
+                stock_info += f"  {d['date']}: 开盘={d['open']}, 收盘={d['close']}, 最高={d['high']}, 最低={d['low']}, 成交量={d['volume']}\n"
+        if sd.get("fundamental_data"):
+            stock_info += "\n财务数据:\n"
+            for f in sd["fundamental_data"][:2]:
+                stock_info += f"  营收={f['revenue']}, 利润={f['profit']}, 净利润={f['net_profit']}\n"
+
+    abc_content = {}
 
     async def event_generator() -> AsyncIterator[str]:
-        for round_num in range(request.max_rounds):
-            for i, agent_id in enumerate(request.agent_ids):
-                agent = get_agent_by_id(agent_id)
-                if not agent:
-                    continue
+        nonlocal stock_info
+        nonlocal abc_content
 
-                is_final = (round_num == request.max_rounds - 1) and (i == len(request.agent_ids) - 1)
+        def build_stock_context():
+            return f"股票代码: {request.stock_code or '未指定'}{stock_info}\n\n"
 
-                if is_final:
-                    stock_info = ""
-                    if request.stock_data:
-                        sd = request.stock_data
-                        stock_info = f"\n\n【股票数据】\n股票代码: {request.stock_code}\n"
+        def build_abc_context():
+            ctx = ""
+            if abc_content.get('A'):
+                ctx += f"\n【{agent_a['name']}】的观点:\n{abc_content['A']}\n"
+            if abc_content.get('B'):
+                ctx += f"\n【{agent_b['name']}】的观点:\n{abc_content['B']}\n"
+            if abc_content.get('C'):
+                ctx += f"\n【{agent_c['name']}】的观点:\n{abc_content['C']}\n"
+            return ctx
 
-                        if sd.get("daily_data"):
-                            stock_info += "\n最近交易日数据:\n"
-                            for d in sd["daily_data"][:5]:
-                                stock_info += f"  {d['date']}: 开盘={d['open']}, 最高={d['high']}, 最低={d['low']}, 收盘={d['close']}, 成交量={d['volume']}, 换手率={d['turnover']}%\n"
-
-                        if sd.get("fundamental_data"):
-                            stock_info += "\n财务数据:\n"
-                            for f in sd["fundamental_data"][:2]:
-                                stock_info += f"  {f['ann_date']}: 营收={f['revenue']}, 利润={f['profit']}, 净利润={f['net_profit']}, 总资产={f['assets']}, 总负债={f['liabilities']}\n"
-
-                    summary_prompt = f"请总结以上所有分析师的意见，并给出最终的投资决策。{stock_info}\n\n"
-                    for aid in request.agent_ids:
-                        if agent_messages[aid]:
-                            a = get_agent_by_id(aid)
-                            summary_prompt += f"\n【{a['name']}】的观点:\n{agent_messages[aid][-1]}\n"
-                    summary_prompt += f"\n\n股票代码: {request.stock_code or '未指定'}\n\n请以JSON格式输出决策，格式如下:\n{{\"decision\": \"BUY/HOLD/SELL\", \"confidence\": 0.85, \"summary\": \"决策理由摘要\"}}\n\n请确保输出是合法的JSON格式。"
-
-                    full_content = ""
-                    async for chunk in call_llm_stream(agent["system_prompt"], summary_prompt):
-                        if chunk["type"] == "chunk":
-                            full_content += chunk["content"]
-                            data = {'type': 'chunk', 'content': chunk['content'], 'agent': agent['name'], 'round': round_num + 1}
-                            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-                        else:
-                            total_tokens = len(full_content) // 4
-                            data = {'type': 'done', 'content': full_content, 'agent': agent['name'], 'tokens': total_tokens}
-                            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-                    try:
-                        json_start = full_content.find('{')
-                        json_end = full_content.rfind('}') + 1
-                        decision_json = json.loads(full_content[json_start:json_end]) if json_start != -1 and json_end > json_start else {"decision": "ERROR", "raw": full_content}
-                    except:
-                        decision_json = {"decision": "ERROR", "raw": full_content}
-
-                    save_discussion_log(session_id, {"session_id": session_id, "stock_code": request.stock_code, "user_prompt": request.user_prompt, "final_decision": decision_json, "all_messages": agent_messages, "total_rounds": request.max_rounds})
+        async def call_agent_stream(agent, prompt, agent_label):
+            full_content = ""
+            yield f"data: {json.dumps({'type': 'thinking_start', 'agent': agent['name'], 'agent_label': agent_label}, ensure_ascii=False)}\n\n"
+            async for chunk in call_llm_stream(agent["system_prompt"], prompt):
+                if chunk["type"] == "chunk":
+                    full_content += chunk["content"]
+                    data = {'type': 'chunk', 'content': chunk["content"], 'agent': agent['name'], 'agent_label': agent_label}
+                    yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
                 else:
-                    stock_info = ""
-                    if request.stock_data:
-                        sd = request.stock_data
-                        stock_info = f"\n\n【股票数据】\n股票代码: {request.stock_code}\n"
-                        if sd.get("daily_data"):
-                            stock_info += "\n最近交易日数据:\n"
-                            for d in sd["daily_data"][:5]:
-                                stock_info += f"  {d['date']}: 开盘={d['open']}, 收盘={d['close']}, 最高={d['high']}, 最低={d['low']}, 成交量={d['volume']}\n"
-                        if sd.get("fundamental_data"):
-                            stock_info += "\n财务数据:\n"
-                            for f in sd["fundamental_data"][:1]:
-                                stock_info += f"  营收={f['revenue']}, 利润={f['profit']}, 净利润={f['net_profit']}\n"
+                    data = {'type': 'done', 'content': full_content, 'agent': agent['name'], 'agent_label': agent_label}
+                    yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-                    context = ""
-                    for prev_agent_id in request.agent_ids[:i]:
-                        if agent_messages[prev_agent_id]:
-                            prev_agent = get_agent_by_id(prev_agent_id)
-                            context += f"\n【{prev_agent['name']}】说:\n{agent_messages[prev_agent_id][-1]}\n"
+        prompt_base = f"请基于以下主题发表你的专业分析:\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}"
 
-                    current_prompt = f"以下是之前的讨论内容:\n{context}{stock_info}\n\n请基于以上内容，发表你的专业分析。" if context else f"请基于以下主题{stock_info}发表专业分析: {request.user_prompt}"
+        prompt_a = f"{prompt_base}\n\n你是{agent_a['name']}，请给出你的专业分析。"
+        prompt_b = f"{prompt_base}\n\n你是{agent_b['name']}，请给出你的专业分析。"
+        prompt_c = f"{prompt_base}\n\n你是{agent_c['name']}，请给出你的专业分析。"
 
-                    full_content = ""
-                    async for chunk in call_llm_stream(agent["system_prompt"], current_prompt):
-                        if chunk["type"] == "chunk":
-                            full_content += chunk["content"]
-                            data = {'type': 'chunk', 'content': chunk['content'], 'agent': agent['name'], 'round': round_num + 1}
-                            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-                        else:
-                            total_tokens = len(full_content) // 4
-                            agent_messages[agent_id].append(full_content)
-                            data = {'type': 'done', 'content': full_content, 'agent': agent['name'], 'tokens': total_tokens}
-                            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+        full_content_a = ""
+        full_content_b = ""
+        full_content_c = ""
+
+        async for chunk_data in call_agent_stream(agent_a, prompt_a, 'A'):
+            yield chunk_data
+            if chunk_data.startswith("data: "):
+                try:
+                    data = json.loads(chunk_data[6:])
+                    if data.get('type') == 'done':
+                        full_content_a = data.get('content', '')
+                except:
+                    pass
+
+        abc_content['A'] = full_content_a
+
+        async for chunk_data in call_agent_stream(agent_b, prompt_b, 'B'):
+            yield chunk_data
+            if chunk_data.startswith("data: "):
+                try:
+                    data = json.loads(chunk_data[6:])
+                    if data.get('type') == 'done':
+                        full_content_b = data.get('content', '')
+                except:
+                    pass
+
+        abc_content['B'] = full_content_b
+
+        async for chunk_data in call_agent_stream(agent_c, prompt_c, 'C'):
+            yield chunk_data
+            if chunk_data.startswith("data: "):
+                try:
+                    data = json.loads(chunk_data[6:])
+                    if data.get('type') == 'done':
+                        full_content_c = data.get('content', '')
+                except:
+                    pass
+
+        abc_content['C'] = full_content_c
+
+        prompt_d_init = f"你是{agent_d['name']}。\n\n请基于以下三位分析师的观点，进行综合分析并给出初步的投资建议：\n{build_abc_context()}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请综合ABC的意见，给出你的分析和建议（可以同意或反对他们的观点）。"
+        d_content = ""
+        d_thinking = True
+        async for chunk_data in call_agent_stream(agent_d, prompt_d_init, 'D'):
+            yield chunk_data
+            if chunk_data.startswith("data: "):
+                try:
+                    data = json.loads(chunk_data[6:])
+                    if data.get('type') == 'done':
+                        d_content = data.get('content', '')
+                        d_thinking = False
+                except:
+                    pass
+
+        prompt_e_comment_d = f"你是{agent_e['name']}。\n\n以下是{agent_d['name']}的综合分析：\n{d_content}\n\n{build_abc_context()}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请批判性地分析{agent_d['name']}的观点，指出其中的优点和不足，并给出你的投资建议。"
+        e_content = ""
+        async for chunk_data in call_agent_stream(agent_e, prompt_e_comment_d, 'E'):
+            yield chunk_data
+            if chunk_data.startswith("data: "):
+                try:
+                    data = json.loads(chunk_data[6:])
+                    if data.get('type') == 'done':
+                        e_content = data.get('content', '')
+                except:
+                    pass
+
+        prompt_d_comment_e = f"你是{agent_d['name']}。\n\n以下是{agent_e['name']}对你的观点的评论：\n{e_content}\n\n你的原始观点是：\n{d_content}\n\n{build_abc_context()}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请回应{agent_e['name']}的评论，维护、修正或改变你的原始立场。"
+        async for chunk_data in call_agent_stream(agent_d, prompt_d_comment_e, 'D'):
+            yield chunk_data
+            if chunk_data.startswith("data: "):
+                try:
+                    data = json.loads(chunk_data[6:])
+                    if data.get('type') == 'done':
+                        d_content = data.get('content', '')
+                except:
+                    pass
+
+        for round_num in range(request.debate_rounds):
+            prompt_e_rebuttal = f"你是{agent_e['name']}。\n\n这是第{parseInt(round_num) + 1}轮讨论。\n\n{agent_d['name']}的最新观点：\n{d_content}\n\n{agent_e['name']}之前的评论：\n{e_content}\n\n{build_abc_context()}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请继续批判性地回应{agent_d['name']}的观点。"
+            e_prev = e_content
+            async for chunk_data in call_agent_stream(agent_e, prompt_e_rebuttal, 'E'):
+                yield chunk_data
+                if chunk_data.startswith("data: "):
+                    try:
+                        data = json.loads(chunk_data[6:])
+                        if data.get('type') == 'done':
+                            e_content = data.get('content', '')
+                    except:
+                        pass
+
+            prompt_d_response = f"你是{agent_d['name']}。\n\n这是第{parseInt(round_num) + 1}轮讨论。\n\n{agent_e['name']}对你的最新回应：\n{e_content}\n\n你之前的观点：\n{d_content}\n\n{build_abc_context()}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请回应{agent_e['name']}的评论，维护或修正你的立场。"
+            d_prev = d_content
+            async for chunk_data in call_agent_stream(agent_d, prompt_d_response, 'D'):
+                yield chunk_data
+                if chunk_data.startswith("data: "):
+                    try:
+                        data = json.loads(chunk_data[6:])
+                        if data.get('type') == 'done':
+                            d_content = data.get('content', '')
+                    except:
+                        pass
+
+        prompt_f_final = f"你是{agent_f['name']}。\n\n以下是最终讨论总结：\n\n{agent_a['name']}的观点：\n{abc_content.get('A', '')}\n\n{agent_b['name']}的观点：\n{abc_content.get('B', '')}\n\n{agent_c['name']}的观点：\n{abc_content.get('C', '')}\n\n{agent_d['name']}的综合分析与最终立场：\n{d_content}\n\n{agent_e['name']}的批判性评论与最终立场：\n{e_content}\n\n{build_stock_context()}\n\n讨论主题: {request.user_prompt}\n\n请综合所有意见，给出最终的投资决策。你的输出必须包含一个JSON格式的决策结果，格式如下：\n{{\"decision\": \"BUY/HOLD/SELL\", \"confidence\": 0.85, \"summary\": \"决策理由摘要\"}}\n\n请确保输出是合法的JSON格式。"
+
+        final_decision = ""
+        async for chunk_data in call_agent_stream(agent_f, prompt_f_final, 'F'):
+            yield chunk_data
+            if chunk_data.startswith("data: "):
+                try:
+                    data = json.loads(chunk_data[6:])
+                    if data.get('type') == 'done':
+                        final_decision = data.get('content', '')
+                except:
+                    pass
+
+        try:
+            json_start = final_decision.find('{')
+            json_end = final_decision.rfind('}') + 1
+            decision_json = json.loads(final_decision[json_start:json_end]) if json_start != -1 and json_end > json_start else {"decision": "ERROR", "raw": final_decision}
+        except:
+            decision_json = {"decision": "ERROR", "raw": final_decision}
+
+        yield f"data: {json.dumps({'type': 'final_decision', 'decision': decision_json, 'summary': final_decision}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { ConfigProvider, App as AntApp, Input, Select, Button, Card, List, Typography, Space, message, Spin } from 'antd'
-import { RobotOutlined, SendOutlined, ClearOutlined } from '@ant-design/icons'
+import { ConfigProvider, Input, Select, Button, Card, List, Typography, Space, Spin, Badge, App, message } from 'antd'
+import { RobotOutlined, SendOutlined } from '@ant-design/icons'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeHighlight from 'rehype-highlight'
 import axios from 'axios'
 import './App.css'
 
@@ -16,22 +19,44 @@ interface Agent {
 interface Message {
   id: string
   agent: string
+  agentKey: string
   content: string
   isUser?: boolean
   timestamp: Date
 }
 
-const API_BASE = 'http://127.0.0.1:8000'
+const AGENT_COLORS: Record<string, string> = {
+  A: '#1890ff',
+  B: '#52c41a',
+  C: '#faad14',
+  D: '#722ed1',
+  E: '#eb2f96',
+  F: '#13c2c2'
+}
 
-function App() {
+const getAgentInitials = (name: string): string => {
+  if (!name) return '??'
+  return name.slice(0, 2)
+}
+
+const API_BASE = 'http://127.0.0.1:8003'
+
+function AppContent() {
   const [agents, setAgents] = useState<Agent[]>([])
-  const [selectedAgents, setSelectedAgents] = useState<number[]>([1, 2, 3, 4])
+  const [selectedAgentA, setSelectedAgentA] = useState<number | null>(null)
+  const [selectedAgentB, setSelectedAgentB] = useState<number | null>(null)
+  const [selectedAgentC, setSelectedAgentC] = useState<number | null>(null)
+  const [selectedAgentD, setSelectedAgentD] = useState<number | null>(null)
+  const [selectedAgentE, setSelectedAgentE] = useState<number | null>(null)
+  const [selectedAgentF, setSelectedAgentF] = useState<number | null>(null)
   const [stockCode, setStockCode] = useState('')
   const [userPrompt, setUserPrompt] = useState('')
-  const [maxRounds, setMaxRounds] = useState(4)
+  const [debateRounds, setDebateRounds] = useState(3)
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
   const [currentStreaming, setCurrentStreaming] = useState<string>('')
+  const [currentAgent, setCurrentAgent] = useState<string>('')
+  const [currentAgentLabel, setCurrentAgentLabel] = useState<string>('')
   const [stockData, setStockData] = useState<any>(null)
   const [loadingData, setLoadingData] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -39,7 +64,7 @@ function App() {
   const decodeUnicode = (str: string): string => {
     if (!str) return '';
     try {
-      return str.replace(/\\u([\dabcdef]{4})/gi, (match, hex) =>
+      return str.replace(/\\u([\dabcdef]{4})/gi, (_match, hex) =>
         String.fromCharCode(parseInt(hex, 16))
       );
     } catch {
@@ -50,6 +75,13 @@ function App() {
   useEffect(() => {
     fetchAgents()
   }, [])
+
+  useEffect(() => {
+    console.log('📊 messages 状态更新:', messages.length, '条')
+    messages.forEach((msg, i) => {
+      console.log(`   [${i}] ${msg.agent} (${msg.agentKey}): ${msg.content.substring(0, 30)}...`)
+    })
+  }, [messages])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -92,14 +124,16 @@ function App() {
       message.warning('请输入讨论主题')
       return
     }
-    if (selectedAgents.length < 2) {
-      message.warning('请至少选择 2 个 Agent')
+    if (!selectedAgentA || !selectedAgentB || !selectedAgentC || !selectedAgentD || !selectedAgentE || !selectedAgentF) {
+      message.warning('请选择所有 6 个 Agent')
       return
     }
 
     setLoading(true)
     setMessages([])
     setCurrentStreaming('')
+    setCurrentAgent('')
+    setCurrentAgentLabel('')
 
     try {
       const response = await fetch(`${API_BASE}/api/discuss`, {
@@ -108,8 +142,13 @@ function App() {
         body: JSON.stringify({
           user_prompt: userPrompt,
           stock_code: stockCode || undefined,
-          agent_ids: selectedAgents,
-          max_rounds: maxRounds,
+          agent_a: selectedAgentA,
+          agent_b: selectedAgentB,
+          agent_c: selectedAgentC,
+          agent_d: selectedAgentD,
+          agent_e: selectedAgentE,
+          agent_f: selectedAgentF,
+          debate_rounds: debateRounds,
           stock_data: stockData || undefined
         })
       })
@@ -122,11 +161,13 @@ function App() {
       const decoder = new TextDecoder()
       let buffer = ''
       let fullContent = ''
-      let currentAgent = ''
+      let currentAgentName = ''
+      let currentAgentLabel = ''
 
       console.log('开始处理流式响应...')
 
-      while (true) {
+      try {
+        while (true) {
         const { done, value } = await reader!.read()
         if (done) {
           console.log('流式响应结束')
@@ -135,13 +176,11 @@ function App() {
 
         buffer += decoder.decode(value, { stream: true })
 
-        // 处理双重转义：后端用 json.dumps() 发送的
         let cleanedBuffer = buffer
           .replace(/\\\\n/g, '\n')
           .replace(/\\\\r/g, '\r')
           .replace(/\\"/g, '"')
 
-        // 按 \n\n 分割事件
         const events = cleanedBuffer.split('\n\n')
         buffer = events.pop() || ''
 
@@ -149,19 +188,16 @@ function App() {
           let trimmed = event.trim()
           if (!trimmed) continue
 
-          // 如果被双引号包裹，先去掉
           if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
             trimmed = trimmed.slice(1, -1)
           }
 
-          // 处理转义字符
           trimmed = trimmed
             .replace(/\\"/g, '"')
             .replace(/\\n/g, '\n')
             .replace(/\\r/g, '\r')
             .replace(/\\\\/g, '\\')
 
-          // 清理 data: 前缀
           let jsonStr = trimmed
           if (jsonStr.startsWith('data: ')) {
             jsonStr = jsonStr.slice(6)
@@ -170,7 +206,6 @@ function App() {
           try {
             const data = JSON.parse(jsonStr)
 
-            // 处理 Unicode 转义（如 \\u57fa\\u672c\\u9762）
             if (typeof data.content === 'string') {
               try {
                 data.content = JSON.parse(`"${data.content}"`)
@@ -182,23 +217,38 @@ function App() {
               } catch {}
             }
 
-            if (data.type === 'chunk') {
+            if (data.type === 'thinking_start') {
+              currentAgentName = data.agent || ''
+              currentAgentLabel = data.agent_label || ''
+              fullContent = ''
+              setCurrentStreaming('')
+              setCurrentAgent(currentAgentName)
+              setCurrentAgentLabel(currentAgentLabel)
+              console.log('🔔 Agent 开始思考:', data.agent, `(${data.agent_label})`)
+            } else if (data.type === 'chunk') {
               fullContent += data.content || ''
-              currentAgent = data.agent || currentAgent
+              currentAgentName = data.agent || currentAgentName
+              currentAgentLabel = data.agent_label || currentAgentLabel
               setCurrentStreaming(fullContent)
-              console.log('收到 chunk:', data.content)
+              setCurrentAgent(currentAgentName)
+              setCurrentAgentLabel(currentAgentLabel)
             } else if (data.type === 'done') {
-              if (fullContent && currentAgent) {
-                setMessages(prev => [...prev, {
+              if (fullContent && currentAgentName) {
+                const newMessage = {
                   id: `${Date.now()}-${Math.random()}`,
-                  agent: currentAgent,
+                  agent: currentAgentName,
+                  agentKey: currentAgentLabel,
                   content: fullContent,
                   timestamp: new Date()
-                }])
-                console.log('保存消息:', { agent: currentAgent, length: fullContent.length })
+                }
+                setMessages(prev => {
+                  const updated = [...prev, newMessage]
+                  console.log('💾 消息已保存，当前消息数:', updated.length)
+                  return updated
+                })
+                console.log('💾 准备保存:', { agent: currentAgentName, key: currentAgentLabel, length: fullContent.length })
               }
               fullContent = ''
-              currentAgent = ''
               setCurrentStreaming('')
             }
           } catch (e) {
@@ -206,16 +256,14 @@ function App() {
           }
         }
       }
-
-      if (fullContent && currentAgent) {
-        setMessages(prev => [...prev, {
-          id: `${Date.now()}-${Math.random()}`,
-          agent: currentAgent,
-          content: fullContent,
-          timestamp: new Date()
-        }])
+      } catch (streamErr) {
+        console.error('流处理错误:', streamErr)
       }
+
+      setCurrentAgent('')
+      setCurrentAgentLabel('')
     } catch (err: any) {
+      console.error('讨论失败:', err)
       message.error(err.message || '讨论失败')
     } finally {
       setLoading(false)
@@ -226,7 +274,7 @@ function App() {
 
   return (
     <ConfigProvider theme={{ token: { colorPrimary: '#1677ff' } }}>
-      <AntApp>
+      <App>
         <div className="app-container">
           <header className="app-header">
             <Title level={3}><RobotOutlined /> AIStock 多智能体讨论系统</Title>
@@ -234,17 +282,77 @@ function App() {
 
           <div className="app-content">
             <Card className="config-panel" title="讨论配置">
-              <Space direction="vertical" style={{ width: '100%' }} size="middle">
-                <div>
-                  <Text strong>选择 Agent（至少2个）:</Text>
-                  <Select
-                    mode="multiple"
-                    placeholder="选择参与讨论的 Agent"
-                    value={selectedAgents}
-                    onChange={setSelectedAgents}
-                    options={agentOptions}
-                    style={{ width: '100%', marginTop: 8 }}
-                  />
+              <Space orientation="vertical" style={{ width: '100%' }} size="middle">
+                <div style={{ borderBottom: '1px solid #f0f0f0', paddingBottom: 12 }}>
+                  <Text strong>选择 Agent（各角色必须选择）:</Text>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Agent A:</Text>
+                      <Select
+                        placeholder="选择 Agent A"
+                        value={selectedAgentA}
+                        onChange={setSelectedAgentA}
+                        options={agentOptions}
+                        style={{ width: '100%' }}
+                        allowClear
+                      />
+                    </div>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Agent B:</Text>
+                      <Select
+                        placeholder="选择 Agent B"
+                        value={selectedAgentB}
+                        onChange={setSelectedAgentB}
+                        options={agentOptions}
+                        style={{ width: '100%' }}
+                        allowClear
+                      />
+                    </div>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Agent C:</Text>
+                      <Select
+                        placeholder="选择 Agent C"
+                        value={selectedAgentC}
+                        onChange={setSelectedAgentC}
+                        options={agentOptions}
+                        style={{ width: '100%' }}
+                        allowClear
+                      />
+                    </div>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Agent D (综合):</Text>
+                      <Select
+                        placeholder="选择 Agent D"
+                        value={selectedAgentD}
+                        onChange={setSelectedAgentD}
+                        options={agentOptions}
+                        style={{ width: '100%' }}
+                        allowClear
+                      />
+                    </div>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Agent E (批判):</Text>
+                      <Select
+                        placeholder="选择 Agent E"
+                        value={selectedAgentE}
+                        onChange={setSelectedAgentE}
+                        options={agentOptions}
+                        style={{ width: '100%' }}
+                        allowClear
+                      />
+                    </div>
+                    <div>
+                      <Text type="secondary" style={{ fontSize: 12 }}>Agent F (决策):</Text>
+                      <Select
+                        placeholder="选择 Agent F"
+                        value={selectedAgentF}
+                        onChange={setSelectedAgentF}
+                        options={agentOptions}
+                        style={{ width: '100%' }}
+                        allowClear
+                      />
+                    </div>
+                  </div>
                 </div>
 
                 <div>
@@ -279,12 +387,14 @@ function App() {
                 </div>
 
                 <div>
-                  <Text strong>讨论轮次:</Text>
+                  <Text strong>辩论轮次 (D/E 讨论):</Text>
                   <Input
                     type="number"
-                    value={maxRounds}
-                    onChange={e => setMaxRounds(parseInt(e.target.value) || 4)}
+                    value={debateRounds}
+                    onChange={e => setDebateRounds(parseInt(e.target.value) || 3)}
                     style={{ marginTop: 8, width: 100 }}
+                    min={1}
+                    max={10}
                   />
                 </div>
 
@@ -313,7 +423,13 @@ function App() {
               </div>
             </Card>
 
-            <Card className="chat-panel" title="讨论区">
+            <Card className="chat-panel" title={
+              <Space>
+                <RobotOutlined />
+                <span>讨论区</span>
+                {loading && <Badge status="processing" text="讨论进行中..." />}
+              </Space>
+            }>
               <div className="messages-container">
                 {messages.length === 0 && !currentStreaming && (
                   <div className="empty-state">
@@ -323,24 +439,47 @@ function App() {
                 )}
 
                 {messages.map(msg => (
-                  <div key={msg.id} className="message-item">
-                    <div className="message-header">
-                      <Text strong>{msg.agent}</Text>
+                  <div key={msg.id} className={`message-item message-${msg.agentKey?.toLowerCase() || 'default'}`}>
+                    <div className="message-avatar" style={{ backgroundColor: AGENT_COLORS[msg.agentKey] || '#999' }}>
+                      {getAgentInitials(msg.agent)}
                     </div>
-                    <div className="message-content">
-                      {decodeUnicode(msg.content)}
+                    <div className="message-body">
+                      <div className="message-header">
+                        <Text strong className="agent-name">{msg.agent}</Text>
+                        <Badge count={`Agent ${msg.agentKey}`} style={{ backgroundColor: AGENT_COLORS[msg.agentKey] || '#999' }} />
+                        <Text type="secondary" className="message-time">
+                          {msg.timestamp.toLocaleTimeString()}
+                        </Text>
+                      </div>
+                      <div className="message-bubble">
+                        <div className="message-content">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                            {decodeUnicode(msg.content)}
+                          </ReactMarkdown>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 ))}
 
                 {currentStreaming && (
-                  <div className="message-item streaming" style={{border: '2px solid #1890ff', backgroundColor: '#e6f7ff'}}>
-                    <div className="message-header">
-                      <Text strong>正在生成...</Text>
-                      <Spin size="small" />
+                  <div className="message-item message-streaming">
+                    <div className="message-avatar" style={{ backgroundColor: AGENT_COLORS[currentAgentLabel] || '#999', opacity: 0.7 }}>
+                      {getAgentInitials(currentAgent)}
                     </div>
-                    <div className="message-content" style={{whiteSpace: 'pre-wrap'}}>
-                      {decodeUnicode(currentStreaming)}
+                    <div className="message-body">
+                      <div className="message-header">
+                        <Text strong className="agent-name">{currentAgent}</Text>
+                        <Badge count={`Agent ${currentAgentLabel}`} style={{ backgroundColor: AGENT_COLORS[currentAgentLabel] || '#999' }} />
+                        <Spin size="small" />
+                      </div>
+                      <div className="message-bubble streaming">
+                        <div className="message-content" style={{whiteSpace: 'pre-wrap'}}>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                            {decodeUnicode(currentStreaming)}
+                          </ReactMarkdown>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -350,9 +489,9 @@ function App() {
             </Card>
           </div>
         </div>
-      </AntApp>
+      </App>
     </ConfigProvider>
   )
 }
 
-export default App
+export default AppContent
